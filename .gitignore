@@ -1,0 +1,19 @@
+# ===================================================================
+# Regras para a pasta 'saida'
+# ===================================================================
+
+# 1. Ignora o conteúdo geral da pasta 'saida'
+saida/*
+
+# 2. MAS, NÃO IGNORE as subpastas que queremos que apareçam no GitHub.
+# A barra "/" no final é crucial, pois diz ao Git: "isso é uma pasta".
+!saida/PI/
+!saida/ABRANGENCIAS/
+
+# 3. AGORA, volte a ignorar o conteúdo DENTRO dessas subpastas que salvamos
+saida/PI/*
+saida/ABRANGENCIAS/*
+
+# 4. E FINALMENTE, crie a exceção para os arquivos .gitkeep DENTRO delas
+!saida/PI/.gitkeep
+!saida/ABRANGENCIAS/.gitkeep
