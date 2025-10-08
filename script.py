@@ -8,7 +8,6 @@ import locale
 import unicodedata
 import openpyxl.cell.cell
 import glob
-import copy
 
 # --- 1. CONFIGURAÇÕES GERAIS ---
 try:
@@ -30,9 +29,11 @@ ARQUIVO_MODELO_RELATORIO = "Lista de Preços e Patrocínios.xlsx"
 ABA_MODELO_RELATORIO_NOME = "PREÇOS 30\""
 
 MAPA_ABRANGENCIA = {
-    'MA1': 'São Luís', 'MAI': 'Interior', 'MAE': 'Estadual',
-    'COD': 'Codó', 'IMP': 'Imperatriz', 'BAS': 'Balsas'
+    'MAE': 'Estadual', 'MAI': 'Interior', 'MA1': 'São Luís',
+    'IMP': 'Imperatriz', 'BAS': 'Balsas', 'CDO': 'Codó'
 }
+
+# --- 2. FUNÇÕES DA ETAPA 1 (Importação e Atualização da Base de Dados) ---
 
 # --- 2. FUNÇÕES DA ETAPA 1 (Importação e Atualização da Base de Dados) ---
 
@@ -44,105 +45,90 @@ def processar_arquivo_globo(globo_file, wb_destino, template_sheet_name, target_
         return
 
     try:
-        globo_df = pd.read_excel(globo_file)
+        globo_df = pd.read_excel(globo_file, dtype={'horario_inicial': str, 'horario_final': str})
     except Exception as e:
         print(f"    - Erro ao ler o arquivo '{globo_file}': {e}")
         return
 
-    abrangencias_map = {'MAE': 'MAE', 'MAI': 'MAI', 'MA1': 'MA1', 'IMP': 'IMP', 'BAS': 'BAS', 'CDO': 'COD'}
+    # Mapeamento e verificação de colunas essenciais
+    abrangencias_map = {'MAE': 'MAE', 'MAI': 'MAI', 'MA1': 'MA1', 'IMP': 'IMP', 'BAS': 'BAS', 'CDO': 'CDO'}
+    colunas_essenciais = ['abrangencia', 'mnemonico', 'nome_programa', 'dias_exibicao', 'horario_inicial', 'preco_30s', 'preco_15s', 'preco_10s', 'genero']
+    for col in colunas_essenciais:
+        if col not in globo_df.columns:
+            print(f"    - Erro: A coluna obrigatória '{col}' não foi encontrada em '{globo_file}'.")
+            return
     
-    if 'abrangencia' not in globo_df.columns:
-        print(f"    - Erro: A coluna 'abrangencia' não foi encontrada no arquivo '{globo_file}'.")
-        return
-    
-    # Filtra e renomeia abrangências
-    df = globo_df[globo_df['abrangencia'].isin(abrangencias_map.keys())].copy()
-    df['abrangencia'] = df['abrangencia'].map(abrangencias_map)
+    # Filtra abrangências e seleciona apenas as colunas que vamos usar
+    df = globo_df[globo_df['abrangencia'].isin(abrangencias_map.keys())][colunas_essenciais].copy()
     
     # Normalização
     df['mnemonico'] = df['mnemonico'].astype(str).str.upper().str.strip()
     def formatar_horario(h):
-        try: return datetime.strptime(str(h)[:5], "%H:%M").strftime("%H:%M")
-        except: return "-"
+        try: return pd.to_datetime(h, errors='coerce').strftime('%H:%M')
+        except:
+            try: return datetime.strptime(str(h)[:5], "%H:%M").strftime("%H:%M")
+            except: return "-"
     df['horario_fmt'] = df['horario_inicial'].apply(formatar_horario)
 
-    # Pivotagem
-    pivot = df.pivot_table(
-        index=['mnemonico', 'nome_programa', 'dias_exibicao', 'horario_fmt'],
-        columns='abrangencia', values='preco_30s', aggfunc='first'
-    ).reset_index().rename(columns={
-        'mnemonico': 'PROG', 'nome_programa': 'NOME',
-        'dias_exibicao': 'DIA', 'horario_fmt': 'HORÁRIO'
-    })
+    # --- ALTERAÇÃO PRINCIPAL: NÃO PIVOTAR ---
+    # Manter os dados em formato "longo" (um registro por linha) é mais simples e robusto.
+    # A pivotagem será feita na Etapa 2, apenas quando necessário.
     
-    # --- INÍCIO DA LÓGICA DE ORDENAÇÃO AVANÇADA (do main.py) ---
-
-    # 1. Funções auxiliares para criar chaves de ordenação
+    # Renomeia colunas para o padrão final
+    df.rename(columns={
+        'mnemonico': 'PROG',
+        'nome_programa': 'NOME',
+        'dias_exibicao': 'DIA',
+        'horario_fmt': 'HORÁRIO',
+        'abrangencia': 'ABRANGENCIA',
+        'genero': 'GENERO',
+        'preco_30s': '30"',
+        'preco_15s': '15"',
+        'preco_10s': '10"'
+    }, inplace=True)
+    
+    # --- Lógica de Ordenação ---
     def get_dia_sort_key(dia):
-        dia_ordem = {
-            'SEG/SÁB': 0, 'SEG-SAB': 0,
-            'SEG/TER/QUA/QUI/SEX': 1, 'SEG-SEX': 1,
-            'SEG': 2, 'TER': 3, 'TER/QUI': 4,
-            'QUA': 5, 'QUI': 6, 'SEX': 7,
-            'SEG/DOM': 8, 'SÁB': 9, 'DOM': 10
-        }
+        dia_ordem = {'SEG/SÁB':0, 'SEG-SAB':0, 'SEG/TER/QUA/QUI/SEX':1, 'SEG-SEX':1, 'SEG':2, 'TER':3, 'TER/QUI':4, 'QUA':5, 'QUI':6, 'SEX':7, 'SEG/DOM':8, 'SÁB':9, 'DOM':10}
         if pd.isna(dia): return 11
-        # Normaliza para garantir consistência (ex: 'SAB' vira 'SÁB')
         dia_upper = str(dia).strip().upper().replace('SAB', 'SÁB')
         return dia_ordem.get(dia_upper, 11)
 
     def hora_sort_key(h):
-        try:
-            return datetime.strptime(str(h), "%H:%M").time()
-        except:
-            # Joga horários inválidos para o final
-            return datetime.strptime("23:59", "%H:%M").time()
+        try: return datetime.strptime(str(h), "%H:%M").time()
+        except: return datetime.strptime("23:59", "%H:%M").time()
 
-    pivot['dia_sort_key'] = pivot['DIA'].apply(get_dia_sort_key)
-    pivot['hora_sort_key'] = pivot['HORÁRIO'].apply(hora_sort_key)
+    df['dia_sort_key'] = df['DIA'].apply(get_dia_sort_key)
+    df['hora_sort_key'] = df['HORÁRIO'].apply(hora_sort_key)
 
-    # 2. Separar, ordenar e juntar blocos
-    pivot['DIA_UPPER'] = pivot['DIA'].astype(str).str.upper().replace('SAB', 'SÁB')
-    bloco_reaplicacao = pivot[pivot['DIA_UPPER'].isin(['SÁB', 'DOM'])].copy()
-    bloco_principal = pivot[~pivot['DIA_UPPER'].isin(['SÁB', 'DOM'])].copy()
-
-    bloco_principal = bloco_principal.sort_values(by=['dia_sort_key', 'hora_sort_key'], ignore_index=True)
-    bloco_reaplicacao = bloco_reaplicacao.sort_values(by=['dia_sort_key', 'hora_sort_key'], ignore_index=True)
-
-    # Define as colunas finais ANTES de criar a linha de reaplicação
-    cols = ['PROG', 'NOME', 'DIA', 'HORÁRIO'] + list(MAPA_ABRANGENCIA.keys())
-    linha_reaplicacao = pd.DataFrame([['REAPLICAÇÃO'] + [None] * (len(cols) - 1)], columns=cols)
-
-    final_df = pd.concat([bloco_principal, linha_reaplicacao, bloco_reaplicacao], ignore_index=True)
-
-    # Adiciona a coluna INDICE ao DataFrame final e a insere na posição correta
-    final_df['INDICE'] = range(1, len(final_df) + 1)
-    cols = ['PROG', 'NOME', 'DIA', 'HORÁRIO', 'INDICE'] + list(MAPA_ABRANGENCIA.keys())
-
-    # --- FIM DA LÓGICA DE ORDENAÇÃO ---
-
-    for col in cols:
-        if col not in final_df.columns:
-            final_df[col] = None
-    final_df = final_df[cols]
+    # Ordena o DataFrame final
+    final_df = df.sort_values(by=['dia_sort_key', 'hora_sort_key', 'PROG'], ignore_index=True)
     
-    # Duplicação e preenchimento da aba
+    # Define a ordem final das colunas
+    cols_finais = ['PROG', 'NOME', 'DIA', 'HORÁRIO', 'ABRANGENCIA', 'GENERO', '30"', '15"', '10"']
+    final_df = final_df[cols_finais]
+
+    # --- Lógica de escrita no Excel ---
     ws_template = wb_destino[template_sheet_name]
     ws_nova = wb_destino.copy_worksheet(ws_template)
     ws_nova.title = target_sheet_name
     
-    # Limpa a área de dados da nova aba
-    for row in ws_nova['A3:K150']: # Limpa um intervalo seguro
+    # Limpa a área de dados da nova aba (apenas algumas linhas e colunas)
+    for row in ws_nova['A2:J150']: 
         for cell in row:
             cell.value = None
-            
+
+    # Escreve o cabeçalho
+    for c_idx, col_name in enumerate(cols_finais, start=1):
+        ws_nova.cell(row=2, column=c_idx, value=col_name)
+
     # Escreve os dados
     start_row = 3
-    for r_idx, row_data in final_df.iterrows():
-        for c_idx, col_name in enumerate(cols, start=1):
-            ws_nova.cell(row=start_row + r_idx, column=c_idx, value=row_data[col_name])
+    for r_idx, row_data in final_df.fillna('').iterrows():
+        for c_idx, col_name in enumerate(cols_finais, start=1):
+             ws_nova.cell(row=start_row + r_idx, column=c_idx, value=row_data[col_name])
     
-    print(f"    - Sucesso: Aba '{target_sheet_name}' criada no arquivo mestre.")
+    print(f"    - Sucesso: Aba '{target_sheet_name}' criada com todos os dados.")
 
 def etapa1_atualizar_dados_mestres():
     print("\n--- INICIANDO ETAPA 1: ATUALIZAÇÃO DA BASE DE DADOS MESTRE ---")
@@ -252,13 +238,10 @@ def atualizar_rodape(sheet, mes, ano):
 
 def etapa2_gerar_relatorios_finais(caminho_dados_atualizado):
     print("\n--- INICIANDO ETAPA 2: GERAÇÃO DOS RELATÓRIOS FINAIS ---")
-    # Usa o caminho recebido da Etapa 1
     caminho_modelo = os.path.join(PASTA_ENTRADA, ARQUIVO_MODELO_RELATORIO)
 
     if not os.path.exists(caminho_dados_atualizado) or not os.path.exists(caminho_modelo):
         print(f"❌ Erro Crítico: Verifique se os arquivos de entrada existem.")
-        print(f"  - Modelo de Relatório: '{caminho_modelo}'")
-        print(f"  - Base de Dados Atualizada: '{caminho_dados_atualizado}'")
         return
 
     xls = pd.ExcelFile(caminho_dados_atualizado)
@@ -274,10 +257,8 @@ def etapa2_gerar_relatorios_finais(caminho_dados_atualizado):
         pasta_saida_final = os.path.join(PASTA_SAIDA, "ABRANGENCIAS", ano_str, mes_nome_str.upper())
         os.makedirs(pasta_saida_final, exist_ok=True)
 
-        df_pivotado = pd.read_excel(xls, sheet_name=sheet_name, header=1)
-        df_unpivoted = df_pivotado.melt(id_vars=['PROG', 'NOME', 'DIA', 'HORÁRIO', 'INDICE'], var_name='ABRANGENCIA', value_name='30"').dropna(subset=['30"'])
-        df_unpivoted.rename(columns={'PROG': 'SIGLA', 'NOME': 'PROGRAMA', 'HORÁRIO': 'HORARIO'}, inplace=True)
-        for col in ['15"', '10"', 'GENERO']: df_unpivoted[col] = ''
+        df_completo = pd.read_excel(xls, sheet_name=sheet_name, header=1)
+        df_completo.rename(columns={'PROG': 'SIGLA', 'NOME': 'PROGRAMA', 'HORÁRIO': 'HORARIO'}, inplace=True)
 
         for abr_codigo, abr_nome in MAPA_ABRANGENCIA.items():
             nome_arquivo_saida = f"{abr_codigo} - Lista de Preços e Patrocínios - {mes_nome_str.capitalize()} {ano_str}.xlsx"
@@ -287,8 +268,18 @@ def etapa2_gerar_relatorios_finais(caminho_dados_atualizado):
                 continue
             
             print(f"  - Gerando relatório para: {abr_codigo}...")
-            df_final_relatorio = df_unpivoted[df_unpivoted['ABRANGENCIA'] == abr_codigo].copy()
-            if df_final_relatorio.empty: continue
+            
+            df_filtrado_abrangencia = df_completo[df_completo['ABRANGENCIA'] == abr_codigo].copy()
+            if df_filtrado_abrangencia.empty: continue
+
+            # --- CORREÇÃO PRINCIPAL: REMOVER DUPLICATAS ---
+            # Agrupa por programa e pega apenas a primeira entrada.
+            # Isso garante que cada programa apareça apenas uma vez.
+            df_final_relatorio = df_filtrado_abrangencia.drop_duplicates(
+                subset=['SIGLA', 'PROGRAMA', 'DIA', 'HORARIO'],
+                keep='first'
+            ).copy()
+            # --------------------------------------------------
 
             df_final_relatorio['DIA_PADRONIZADO'] = df_final_relatorio['DIA'].apply(padronizar_dia)
             workbook = openpyxl.load_workbook(caminho_modelo)
@@ -296,6 +287,7 @@ def etapa2_gerar_relatorios_finais(caminho_dados_atualizado):
             sheet['A2'] = f'LISTA DE PREÇOS {mes_nome_str.upper()} DE {ano_str}'
             sheet['A3'] = f'{abr_nome.upper()} ({abr_codigo})'
 
+            # (O restante da função continua exatamente igual)
             posicoes_titulos = {}
             primeira_secao_encontrada = False
             for row in sheet.iter_rows(min_row=7, max_row=sheet.max_row):
@@ -314,24 +306,33 @@ def etapa2_gerar_relatorios_finais(caminho_dados_atualizado):
                 for r in range(clear_start, clear_end + 1):
                     if r > sheet.max_row: break
                     for c in range(1, 9):
-                        # ... Lógica de limpeza ...
-                        pass # Deixando a limpeza mais simples por enquanto
+                        cell = sheet.cell(row=r, column=c)
+                        if not isinstance(cell, openpyxl.cell.cell.MergedCell):
+                            cell.value = None
 
             df_final_relatorio['DIA_GRP'] = df_final_relatorio['DIA'].apply(get_dia_group)
             for tipo_dia, df_grupo in df_final_relatorio.groupby('DIA_GRP'):
                 if tipo_dia not in posicoes_titulos: continue
+                
                 df_grupo['DIA_ORDEM'] = df_grupo['DIA_PADRONIZADO'].apply(get_dia_ordem)
                 horarios_convertidos = pd.to_datetime(df_grupo['HORARIO'], format='%H:%M', errors='coerce')
                 df_grupo['HORARIO_AJUSTADO'] = horarios_convertidos.apply(ajustar_horario_para_ordenacao)
-                df_grupo_ordenado = df_grupo.sort_values(by=['DIA_ORDEM', 'HORARIO_AJUSTADO', 'INDICE'], na_position='last')
+                
+                df_grupo_ordenado = df_grupo.sort_values(by=['DIA_ORDEM', 'HORARIO_AJUSTADO', 'SIGLA'])
                 
                 linha_atual = posicoes_titulos[tipo_dia] + 2
                 for _, row_data in df_grupo_ordenado.iterrows():
                     horario_obj = pd.to_datetime(row_data['HORARIO'], errors='coerce')
                     horario_val = horario_obj.strftime('%H:%M') if pd.notna(horario_obj) else '-'
                     valores = [
-                        row_data.get('DIA_PADRONIZADO', ''), horario_val, row_data.get('SIGLA', ''), row_data.get('PROGRAMA', ''),
-                        row_data.get('GENERO', ''), row_data.get('30"', 0), row_data.get('15"', 0), row_data.get('10"', 0)
+                        row_data.get('DIA_PADRONIZADO', ''),
+                        horario_val,
+                        row_data.get('SIGLA', ''),
+                        row_data.get('PROGRAMA', ''),
+                        row_data.get('GENERO', ''),
+                        row_data.get('30"', 0),
+                        row_data.get('15"', 0),
+                        row_data.get('10"', 0)
                     ]
                     for col_idx, value in enumerate(valores, 1):
                         cell = sheet.cell(row=linha_atual, column=col_idx)
